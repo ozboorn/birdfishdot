@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flocking Particle Simulation</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+        }
+        
+        #simulation-container {
+            width: 100%;
+            height: 100%;
+            position: relative;
+        }
+        
+        #flocking-canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            background-color: #000;
+        }
+    </style>
+</head>
+<body>
+    <div id="simulation-container">
+        <canvas id="flocking-canvas"></canvas>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const canvas = document.getElementById('flocking-canvas');
+            const container = document.getElementById('simulation-container');
+            const ctx = canvas.getContext('2d');
+            
+            // Set canvas size to match container
+            canvas.width = container.offsetWidth;
+            canvas.height = container.offsetHeight;
+            
+            // Mouse position tracking
+            let mouse = {
+                x: canvas.width / 2,
+                y: canvas.height / 2,
+                radius: 150,  // Radius of influence
+                active: false
+            };
+            
+            // Calculate distance between two points
+            function distance(point1, point2) {
+                const dx = point2.x - point1.x;
+                const dy = point2.y - point1.y;
+                return Math.sqrt(dx * dx + dy * dy);
+            }
+            
+            // Particle class for each "bird"
+            class Particle {
+                constructor() {
+                    this.position = {
+                        x: Math.random() * canvas.width,
+                        y: Math.random() * canvas.height
+                    };
+                    this.velocity = {
+                        x: (Math.random() * 2 - 1) * 2,
+                        y: (Math.random() * 2 - 1) * 2
+                    };
+                    this.acceleration = {
+                        x: 0,
+                        y: 0
+                    };
+                    this.maxSpeed = 1.5;
+                    this.maxForce = 0.03;
+                    this.size = Math.random() * 2 + 1; // Varied sizes between 1-3px
+                    this.isAffectedByMouse = false; // Track if particle is being affected by mouse
+                }
+                
+                // Apply force to acceleration
+                applyForce(force) {
+                    this.acceleration.x += force.x;
+                    this.acceleration.y += force.y;
+                }
+                
+                // Alignment behavior: steer towards average heading of local flockmates
+                align(particles) {
+                    const perceptionRadius = 80;
+                    let steering = { x: 0, y: 0 };
+                    let total = 0;
+                    
+                    for (let other of particles) {
+                        const d = distance(this.position, other.position);
+                        if (other !== this && d < perceptionRadius) {
+                            steering.x += other.velocity.x;
+                            steering.y += other.velocity.y;
+                            total++;
+                        }
+                    }
+                    
+                    if (total > 0) {
+                        steering.x /= total;
+                        steering.y /= total;
+                        
+                        // Set magnitude to maxSpeed
+                        const mag = Math.sqrt(steering.x * steering.x + steering.y * steering.y);
+                        steering.x = (steering.x / mag) * this.maxSpeed;
+                        steering.y = (steering.y / mag) * this.maxSpeed;
+                        
+                        // Steering = desired - velocity
+                        steering.x -= this.velocity.x;
+                        steering.y -= this.velocity.y;
+                        
+                        // Limit force
+                        const forceMag = Math.sqrt(steering.x * steering.x + steering.y * steering.y);
+                        if (forceMag > this.maxForce) {
+                            steering.x = (steering.x / forceMag) * this.maxForce;
+                            steering.y = (steering.y / forceMag) * this.maxForce;
+                        }
+                    }
+                    
+                    return steering;
+                }
+                
+                // Cohesion behavior: steer towards center of mass of local flockmates
+                cohesion(particles) {
+                    const perceptionRadius = 100;
+                    let steering = { x: 0, y: 0 };
+                    let total = 0;
+                    
+                    for (let other of particles) {
+                        const d = distance(this.position, other.position);
+                        if (other !== this && d < perceptionRadius) {
+                            steering.x += other.position.x;
+                            steering.y += other.position.y;
+                            total++;
+                        }
+                    }
+                    
+                    if (total > 0) {
+                        steering.x /= total;
+                        steering.y /= total;
+                        
+                        // Vector pointing from current position to center of mass
+                        steering.x -= this.position.x;
+                        steering.y -= this.position.y;
+                        
+                        // Set magnitude to maxSpeed
+                        const mag = Math.sqrt(steering.x * steering.x + steering.y * steering.y);
+                        if (mag > 0) { // Avoid division by zero
+                            steering.x = (steering.x / mag) * this.maxSpeed;
+                            steering.y = (steering.y / mag) * this.maxSpeed;
+                            
+                            // Steering = desired - velocity
+                            steering.x -= this.velocity.x;
+                            steering.y -= this.velocity.y;
+                            
+                            // Limit force
+                            const forceMag = Math.sqrt(steering.x * steering.x + steering.y * steering.y);
+                            if (forceMag > this.maxForce) {
+                                steering.x = (steering.x / forceMag) * this.maxForce;
+                                steering.y = (steering.y / forceMag) * this.maxForce;
+                            }
+                        }
+                    }
+                    
+                    return steering;
+                }
+                
+                // Separation behavior: steer to avoid crowding local flockmates
+                separation(particles) {
+                    const perceptionRadius = 40; // Increased from 30
+                    let steering = { x: 0, y: 0 };
+                    let total = 0;
+                    
+                    for (let other of particles) {
+                        const d = distance(this.position, other.position);
+                        if (other !== this && d < perceptionRadius) {
+                            // Vector pointing away from neighbor
+                            let diff = {
+                                x: this.position.x - other.position.x,
+                                y: this.position.y - other.position.y
+                            };
+                            
+                            // Weight by distance (closer neighbors have stronger effect)
+                            diff.x /= d * d;
+                            diff.y /= d * d;
+                            
+                            steering.x += diff.x;
+                            steering.y += diff.y;
+                            total++;
+                        }
+                    }
+                    
+                    if (total > 0) {
+                        steering.x /= total;
+                        steering.y /= total;
+                        
+                        // Set magnitude to maxSpeed
+                        const mag = Math.sqrt(steering.x * steering.x + steering.y * steering.y);
+                        if (mag > 0) { // Avoid division by zero
+                            steering.x = (steering.x / mag) * this.maxSpeed;
+                            steering.y = (steering.y / mag) * this.maxSpeed;
+                            
+                            // Steering = desired - velocity
+                            steering.x -= this.velocity.x;
+                            steering.y -= this.velocity.y;
+                            
+                            // Limit force
+                            const forceMag = Math.sqrt(steering.x * steering.x + steering.y * steering.y);
+                            if (forceMag > this.maxForce) {
+                                steering.x = (steering.x / forceMag) * this.maxForce;
+                                steering.y = (steering.y / forceMag) * this.maxForce;
+                            }
+                        }
+                    }
+                    
+                    return steering;
+                }
+                
+                // Avoid mouse when it's nearby - like fish avoiding a predator
+                avoidMouse(mouse) {
+                    let steering = { x: 0, y: 0 };
+                    
+                    this.isAffectedByMouse = false; // Reset state
+                    
+                    if (mouse.active) {
+                        const d = distance(this.position, { x: mouse.x, y: mouse.y });
+                        
+                        // If within influence radius
+                        if (d < mouse.radius) {
+                            // Mark this particle as affected by mouse
+                            this.isAffectedByMouse = true;
+                            
+                            // Stronger effect when closer to mouse
+                            const intensity = Math.pow(1 - (d / mouse.radius), 1.5); // More responsive curve
+                            
+                            // Vector pointing away from mouse
+                            steering.x = this.position.x - mouse.x;
+                            steering.y = this.position.y - mouse.y;
+                            
+                            // Normalize and scale by intensity
+                            const mag = Math.sqrt(steering.x * steering.x + steering.y * steering.y);
+                            if (mag > 0) {
+                                steering.x = (steering.x / mag) * this.maxSpeed * intensity * 3;
+                                steering.y = (steering.y / mag) * this.maxSpeed * intensity * 3;
+                            }
+                        }
+                    }
+                    
+                    return steering;
+                }
+                
+                // Edge wrapping
+                edges() {
+                    if (this.position.x > canvas.width) this.position.x = 0;
+                    if (this.position.x < 0) this.position.x = canvas.width;
+                    if (this.position.y > canvas.height) this.position.y = 0;
+                    if (this.position.y < 0) this.position.y = canvas.height;
+                }
+                
+                // Main update method
+                update() {
+                    // Update velocity
+                    this.velocity.x += this.acceleration.x;
+                    this.velocity.y += this.acceleration.y;
+                    
+                    // Limit speed
+                    const speed = Math.sqrt(this.velocity.x * this.velocity.x + this.velocity.y * this.velocity.y);
+                    if (speed > this.maxSpeed) {
+                        this.velocity.x = (this.velocity.x / speed) * this.maxSpeed;
+                        this.velocity.y = (this.velocity.y / speed) * this.maxSpeed;
+                    }
+                    
+                    // Update position
+                    this.position.x += this.velocity.x;
+                    this.position.y += this.velocity.y;
+                    
+                    // Reset acceleration
+                    this.acceleration.x = 0;
+                    this.acceleration.y = 0;
+                }
+                
+                // Apply flocking behaviors
+                flock(particles, mouse) {
+                    const alignment = this.align(particles);
+                    const cohesion = this.cohesion(particles);
+                    const separation = this.separation(particles);
+                    const avoidMouse = this.avoidMouse(mouse);
+                    
+                    // Weight the behaviors
+                    alignment.x *= 1.0;  // Reduced alignment
+                    alignment.y *= 1.0;
+                    cohesion.x *= 1.2;   // Reduced cohesion for looser clusters
+                    cohesion.y *= 1.2;
+                    separation.x *= 1.3; // Increased separation to spread particles more
+                    separation.y *= 1.3;
+                    avoidMouse.x *= 8.0; // Much stronger mouse avoidance
+                    avoidMouse.y *= 8.0;
+                    
+                    // Apply forces
+                    this.applyForce(alignment);
+                    this.applyForce(cohesion);
+                    this.applyForce(separation);
+                    this.applyForce(avoidMouse);
+                }
+                
+                // Draw the particle
+                draw() {
+                    ctx.beginPath();
+                    ctx.arc(this.position.x, this.position.y, this.size, 0, Math.PI * 2);
+                    
+                    // Change color to red if affected by mouse
+                    if (this.isAffectedByMouse) {
+                        ctx.fillStyle = 'rgba(255, 0, 0, 0.8)'; // Red for affected particles
+                    } else {
+                        ctx.fillStyle = 'rgba(255, 255, 255, 0.8)'; // White for normal particles
+                    }
+                    
+                    ctx.fill();
+                }
+            }
+            
+            // Draw blue dot at mouse position
+            function drawMouseInfluence() {
+                if (mouse.active) {
+                    // Draw a blue dot
+                    ctx.beginPath();
+                    ctx.arc(mouse.x, mouse.y, 8, 0, Math.PI * 2);
+                    ctx.fillStyle = '#0000FF';
+                    ctx.fill();
+                    
+                    // Draw a smaller circle indicating influence radius
+                    ctx.beginPath();
+                    ctx.arc(mouse.x, mouse.y, mouse.radius, 0, Math.PI * 2);
+                    ctx.strokeStyle = 'rgba(0, 0, 255, 0.1)';
+                    ctx.lineWidth = 0.5;
+                    ctx.stroke();
+                }
+            }
+            
+            // Create particles
+            const particleCount = 300; // More particles for better clustering
+            const particles = [];
+            
+            for (let i = 0; i < particleCount; i++) {
+                particles.push(new Particle());
+            }
+            
+            // Animation loop
+            function animate() {
+                // Clear canvas with semi-transparent black for motion trail effect
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                
+                // Draw mouse influence area
+                drawMouseInfluence();
+                
+                // Update and draw particles
+                for (let particle of particles) {
+                    particle.flock(particles, mouse);
+                    particle.update();
+                    particle.edges();
+                    particle.draw();
+                }
+                
+                requestAnimationFrame(animate);
+            }
+            
+            // Add mouse move event listener
+            const handleMouseMove = (e) => {
+                const rect = canvas.getBoundingClientRect();
+                mouse.x = e.clientX - rect.left;
+                mouse.y = e.clientY - rect.top;
+                mouse.active = true;
+            };
+            
+            const handleMouseLeave = () => {
+                mouse.active = false;
+            };
+            
+            canvas.addEventListener('mousemove', handleMouseMove);
+            canvas.addEventListener('mouseleave', handleMouseLeave);
+            
+            // Initial black background
+            ctx.fillStyle = 'black';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Start animation
+            animate();
+            
+            // Adjust simulation on window resize
+            const handleResize = () => {
+                canvas.width = container.offsetWidth;
+                canvas.height = container.offsetHeight;
+                ctx.fillStyle = 'black';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            };
+            
+            window.addEventListener('resize', handleResize);
+        });
+    </script>
+</body>
+</html>
